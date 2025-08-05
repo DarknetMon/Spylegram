@@ -1,28 +1,70 @@
+import re
+from typing import Optional
+
 from telethon.tl.types import DocumentAttributeFilename, Message
 from telethon.utils import get_extension
 
-from src.logging_config import logger
+from src.logging_config import get_logger
+import requests
+from bs4 import BeautifulSoup
+import asyncio
+import functools
+utils_logger = get_logger("utils")
 
 
-def read_binary_file(file_path: str) -> bytes | None:
+
+def async_retry(retries=3, delay=2, backoff=2, exceptions=(Exception,)):
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            attempt = 0
+            wait = delay
+            while attempt < retries:
+                try:
+                    return await func(*args, **kwargs)
+                except exceptions as e:
+                    attempt += 1
+                    utils_logger.warning(f"[Retry] Exception: {e}. Retrying {attempt}/{retries} in {wait}s")
+                    await asyncio.sleep(wait)
+                    wait *= backoff
+            utils_logger.error(f"[Retry] Failed after {retries} attempts")
+            raise
+        return wrapper
+    return decorator
+
+def get_subscribers_count(channel_url: str) -> int:
+    try:
+        response = requests.get(channel_url)
+        if response.status_code != 200:
+            return 0
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        div = soup.find('div', class_='tgme_page_extra')
+
+        if not div:
+            return 0
+
+        text = div.text.strip().lower()
+
+        match = re.match(r'^([\d\s,]+)\s+(members|subscriber|subscribers)\b', text, re.IGNORECASE)
+        if match:
+            num = match.group(1).replace(",", "").replace(" ", "")
+            return int(num)
+        return 0
+
+    except Exception as e:
+        utils_logger.error(f"[!] Error in get_subscribers_count: {type(e).__name__}: {e}")
+        return 0
+
+
+def read_binary_file(file_path: str) -> Optional[bytes]:
     try:
         with open(file_path, "rb") as file:
             return file.read()
     except FileNotFoundError as fnf_error:
-        logger.error("Error reading file %s" % type(fnf_error).__name__)
+        utils_logger.error("Error reading file %s" % type(fnf_error).__name__)
         return None
 
-
-def callback_photo(current: int, total: int) -> None:
-    # logger.info('Downloaded', current, 'out of', total, 'bytes: {:.2%}'.format(current / total))
-    percentage = (current / total) * 100
-    logger.info("Downloaded %d out of %d bytes: %.2f%%", current, total, percentage)
-
-
-def callback_document(current: int, total: int) -> None:
-    # logger.info('Downloaded', current, 'out of', total, 'bytes: {:.2%}'.format(current / total))
-    percentage = (current / total) * 100
-    logger.info("Downloaded %d out of %d bytes: %.2f%%", current, total, percentage)
 
 
 def get_mime_type(message: Message) -> str:
@@ -30,16 +72,3 @@ def get_mime_type(message: Message) -> str:
     extension_type = get_extension(message.media)
     return extension_type if extension_type else document.mime_type.split("/")[1]
 
-
-def get_document_name(message: Message) -> str:
-    document = message.media.document
-    document_attributes_list = document.attributes
-    if len(document_attributes_list) > 1:
-        for attr in document_attributes_list:
-            if isinstance(attr, DocumentAttributeFilename):
-                return attr.file_name
-
-    if isinstance(document.attributes[0], DocumentAttributeFilename):
-        return document.attributes[0].file_name
-
-    return f"{message.id}"
